@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal
 
 import click
@@ -795,8 +796,9 @@ def _carried_error(error: BaseException) -> BaseException | None:
 
 
 def _error_class(error: BaseException) -> str:
-    """The class of the error behind ERROR, by name when its top-level package
-    is in `_NAMED_ERROR_PACKAGES`, else `other`; never its message."""
+    """The class of the error behind ERROR, by name when a loaded module of a
+    package in `_NAMED_ERROR_PACKAGES` defines it, else `other`; never its
+    message."""
     seen: set[int] = set()
     while id(error) not in seen:
         seen.add(id(error))
@@ -805,9 +807,18 @@ def _error_class(error: BaseException) -> str:
             break
         error = carried
     error_type = type(error)
-    if error_type.__module__.partition(".")[0] in _NAMED_ERROR_PACKAGES:
-        return error_type.__name__
-    return "other"
+    if error_type.__module__.partition(".")[0] not in _NAMED_ERROR_PACKAGES:
+        return "other"
+    # `__module__` and `__qualname__` are only what the class says, and a
+    # project's class can say `openai`: name it only when that module really
+    # holds this class there. `vars`, not `getattr`, so a lazy module
+    # `__getattr__` (crewai's, pydantic's) imports nothing.
+    owner: object = sys.modules.get(error_type.__module__)
+    for name in error_type.__qualname__.split("."):
+        if not isinstance(owner, (ModuleType, type)):
+            return "other"
+        owner = vars(owner).get(name)
+    return error_type.__name__ if owner is error_type else "other"
 
 
 def record_run_started(kind: RunKind) -> None:

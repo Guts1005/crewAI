@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, get_args
 from unittest.mock import MagicMock
 import uuid
@@ -611,8 +611,25 @@ def validation_error(raised_by_validator: Exception | None) -> Exception:
     return raised.value
 
 
-def projects_own_error(module: str = f"{SECRET}.main") -> Exception:
-    return type("AcmeSecretProjectError", (Exception,), {"__module__": module})(SECRET)
+def projects_own_error(
+    module: str = f"{SECRET}.main", qualname: str = "AcmeSecretProjectError"
+) -> Exception:
+    namespace = {"__module__": module, "__qualname__": qualname}
+    return type("AcmeSecretProjectError", (Exception,), namespace)(SECRET)
+
+
+def a_projects_error_claiming(module: str, qualname: str = "AcmeSecretProjectError") -> Exception:
+    """A project's own error whose class says openai's MODULE defines it, with
+    openai loaded, so the claim is checked against the real package."""
+    import openai  # noqa: F401
+
+    return projects_own_error(module, qualname)
+
+
+def an_openai_error() -> Exception:
+    import openai
+
+    return openai.OpenAIError(SECRET)
 
 
 def a_library_error() -> Exception:
@@ -660,8 +677,12 @@ def json_decode_error() -> Exception:
         ),
         (a_library_error, "ConnectError"),
         (a_yaml_error, "YAMLError"),
+        (an_openai_error, "OpenAIError"),
         (projects_own_error, "other"),
         (lambda: projects_own_error("crewai_acme.errors"), "other"),
+        (lambda: a_projects_error_claiming("openai"), "other"),
+        (lambda: a_projects_error_claiming("openai.errors"), "other"),
+        (lambda: a_projects_error_claiming("openai", "OpenAIError"), "other"),
         (lambda: raised_from(SystemExit(1), projects_own_error()), "other"),
         (lambda: json_project_error(projects_own_error()), "other"),
         (lambda: raised_from(ImportError(SECRET), projects_own_error()), "other"),
@@ -680,8 +701,12 @@ def json_decode_error() -> Exception:
         "an_import_error_raised_from_another_behind_json_project_error",
         "a_library_error",
         "a_yaml_error",
+        "an_openai_error_whose_module_openai_rewrites",
         "a_projects_own_error",
         "a_package_named_like_crewai",
+        "a_projects_own_error_claiming_openai",
+        "a_projects_own_error_claiming_an_openai_module_that_does_not_exist",
+        "a_projects_own_error_claiming_an_openai_class_by_its_qualname",
         "a_projects_own_error_behind_system_exit",
         "a_projects_own_error_behind_json_project_error",
         "a_projects_own_error_behind_an_import_error",
@@ -733,6 +758,29 @@ def test_counting_the_class_imports_neither_crewai_nor_pydantic(
     )
 
     assert error_classes == ["ModuleNotFoundError"]
+
+
+def test_checking_a_class_claim_runs_no_lazy_module_getattr(
+    project, usage, error_classes, monkeypatch
+) -> None:
+    """crewai's and pydantic's module `__getattr__` import on a miss (crewai's
+    `Memory` loads lancedb): checking where a class says it is defined calls none."""
+    looked_up: list[str] = []
+
+    def lazy_getattr(name: str) -> object:
+        looked_up.append(name)
+        raise AttributeError(name)
+
+    lazy = ModuleType("crewai.usage_lazy_module")
+    vars(lazy)["__getattr__"] = lazy_getattr
+    monkeypatch.setitem(sys.modules, "crewai.usage_lazy_module", lazy)
+
+    run_crew_module.record_run_stopped(
+        "load_failed", projects_own_error("crewai.usage_lazy_module")
+    )
+
+    assert error_classes == ["other"]
+    assert looked_up == []
 
 
 @pytest.mark.parametrize(
