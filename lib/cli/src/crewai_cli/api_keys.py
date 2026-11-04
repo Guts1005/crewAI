@@ -23,6 +23,7 @@ from dotenv import dotenv_values, set_key
 
 from crewai_cli.constants import (
     DEFAULT_LLM_MODEL,
+    ENV_VARS,
     provider_for_model,
     required_key_names,
 )
@@ -179,11 +180,38 @@ def ask_for_api_key(name: str, project_dir: Path, json_crew: Path | None) -> boo
         Whether a key was pasted.
     """
     env_file = _env_file(project_dir)
-    if not _can_ask(project_dir, env_file):
+    if not _askable(name) or not _can_ask(project_dir, env_file):
         return False
     saved = dotenv_values(env_file) if env_file.exists() else {}
+    from_env_file = _endpoint_settings(
+        {key: value for key, value in saved.items() if value}
+    )
+    # The crew's own code ran while it loaded, and may have pointed a provider
+    # at another host through the environment.
+    loaded = [
+        f"{_host(value)} ({key} set while the crew loaded)".encode(
+            "unicode_escape"
+        ).decode("ascii")
+        for key, value in _endpoint_settings(os.environ).items()
+        if value and value not in (_MACHINE_ENDPOINTS.get(key), from_env_file.get(key))
+    ]
     return _ask_and_save(
-        name, env_file, _project_endpoints(saved, json_crew, project_dir)
+        name, env_file, _project_endpoints(saved, json_crew, project_dir) + loaded
+    )
+
+
+# crewAI's providers name the key they miss `<PROVIDER>_API_KEY`.
+_PROVIDER_KEY_NAME = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_API_KEY")
+
+
+def _askable(name: str) -> bool:
+    """Whether NAME is a provider API key the CLI may ask for. A failed run
+    names its own variable, and project code can raise that error too."""
+    if _PROVIDER_KEY_NAME.fullmatch(name):
+        return True
+    single = (required_key_names(provider) for provider in ENV_VARS)
+    return name in {names[0] for names in single if len(names) == 1} or any(
+        name in names for names in _ALTERNATIVE_KEYS.values()
     )
 
 
