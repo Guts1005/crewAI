@@ -1,4 +1,5 @@
-"""Ask for the API keys a project's models need before `crewai run` starts them.
+"""Ask for the API keys a project's models need before `crewai run` starts them,
+or once a JSON crew's run has failed without one.
 
 `run_crew.py` imports this module, and a JSON crew's runner loads `run_crew.py`
 inside the project's environment, whose crewai and crewai_core can be older
@@ -89,6 +90,41 @@ def ask_for_missing_api_keys(
     if not missing:
         return None
 
+    if not _can_ask(project_dir, env_file):
+        for name in missing:
+            click.secho(missing_key_line(name, project_dir), fg="yellow", err=True)
+        return "warned"
+
+    outcome: ApiKeyOutcome = "skipped"
+    for name in missing:
+        if _ask_and_save(name, env_file):
+            outcome = "saved"
+    return outcome
+
+
+def ask_for_api_key(name: str, project_dir: Path) -> bool:
+    """Ask for ``name``, an API key a run failed without, and save it.
+
+    The key is asked for, exported and saved as
+    :func:`ask_for_missing_api_keys` does, and not asked for where that
+    function would only print the line to add.
+
+    Returns:
+        Whether a key was pasted.
+    """
+    env_file = _env_file(project_dir)
+    return _can_ask(project_dir, env_file) and _ask_and_save(name, env_file)
+
+
+def missing_key_line(name: str, project_dir: Path) -> str:
+    """The line that tells how to set ``name`` for the project's runs."""
+    return (
+        f"{name} is not set. Add {name}=<your key> to {_env_file(project_dir)}, "
+        "then run `crewai run` again."
+    )
+
+
+def _can_ask(project_dir: Path, env_file: Path) -> bool:
     # Only a regular `.env` of the project's own is rewritten, or a new one
     # made: a new one would hide the `.env` above it, and a rewrite turns a
     # link, or a pipe a secrets manager serves, into a plain file.
@@ -97,41 +133,32 @@ def ask_for_missing_api_keys(
         and not env_file.is_symlink()
         and (env_file.is_file() or not env_file.exists())
     )
-    if not savable or not _can_prompt():
-        for name in missing:
-            click.secho(
-                f"{name} is not set. Add {name}=<your key> to {env_file}, "
-                "then run `crewai run` again.",
-                fg="yellow",
-                err=True,
-            )
-        return "warned"
+    return savable and _can_prompt()
 
-    outcome: ApiKeyOutcome = "skipped"
-    for name in missing:
-        value = click.prompt(
-            f"{name} isn't set. Paste it to save it to .env (Enter to skip)",
-            hide_input=True,
-            default="",
-            show_default=False,
-        ).strip()
-        if not value:
-            continue
-        os.environ[name] = value
-        outcome = "saved"
-        try:
-            set_key(env_file, name, value, quote_mode="never")
-        except OSError as error:
-            # The run has the key either way; only the next run will not.
-            click.secho(
-                f"Couldn't save {name} to {env_file} ({error.strerror or error}), "
-                "so only this run uses it.",
-                fg="yellow",
-                err=True,
-            )
-        else:
-            click.echo(f"Saved {name} to {env_file}")
-    return outcome
+
+def _ask_and_save(name: str, env_file: Path) -> bool:
+    value = click.prompt(
+        f"{name} isn't set. Paste it to save it to .env (Enter to skip)",
+        hide_input=True,
+        default="",
+        show_default=False,
+    ).strip()
+    if not value:
+        return False
+    os.environ[name] = value
+    try:
+        set_key(env_file, name, value, quote_mode="never")
+    except OSError as error:
+        # The run has the key either way; only the next run will not.
+        click.secho(
+            f"Couldn't save {name} to {env_file} ({error.strerror or error}), "
+            "so only this run uses it.",
+            fg="yellow",
+            err=True,
+        )
+    else:
+        click.echo(f"Saved {name} to {env_file}")
+    return True
 
 
 def _can_prompt() -> bool:

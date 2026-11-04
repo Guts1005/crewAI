@@ -236,6 +236,8 @@ OPENAI_API_KEY is not set. Add OPENAI_API_KEY=<your key> to /path/to/my_crew/.en
 
 The check covers providers that take a single API key, such as OpenAI, Anthropic, Gemini and Groq. It skips Azure, Bedrock and watsonx, local models such as Ollama, and declarative flows. It does not read an `llm` set in Python code, and when a project's code sets one, it does not check the default model either.
 
+If a JSON crew still fails because an API key is not set, for example the key of a model this check skips, the run stops with the same line instead of a traceback. At a terminal, the CLI first asks for that key as above, then builds the crew again and runs it once more; press Enter to stop instead.
+
 <Note>
   Make sure to run these commands from the directory where your CrewAI project
   is set up. Some commands may require additional configuration or setup within
