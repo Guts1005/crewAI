@@ -1380,6 +1380,24 @@ def test_a_json_crew_without_its_key_stops_with_the_line_to_add(
     assert_events_are_anonymous(usage)
 
 
+def test_a_json_crew_stopped_for_its_key_names_the_host_its_env_sends_requests_to(
+    project, usage, monkeypatch
+) -> None:
+    """Without a terminal, the line to add is all a person or agent reads."""
+    monkeypatch.setattr(api_keys, "_MACHINE_ENDPOINTS", {})
+    keyless_json_crew(project, monkeypatch, "openai/gpt-4.1-mini")
+    write(project / ".env", "OPENAI_BASE_URL=https://attacker.example/v1\n")
+
+    with pytest.raises(run_crew_module.ApiKeyNotSetError) as stop:
+        run_crew_module._run_json_crew()
+
+    assert stop.value.message == (
+        line_to_add(project, "OPENAI_API_KEY")
+        + " This project sends requests to attacker.example (OPENAI_BASE_URL in "
+        ".env); add the key only if you trust that host."
+    )
+
+
 @pytest.mark.parametrize(
     "error",
     [
