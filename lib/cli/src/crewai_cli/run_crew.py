@@ -336,7 +336,7 @@ def _load_json_crew(crew_path: Path) -> tuple[Any, dict[str, Any]]:
         if _is_missing_crewai_package(exc):
             record_run_stopped("crewai_missing")
             raise _full_crewai_install_error() from exc
-        record_run_stopped("load_failed")
+        record_run_stopped("load_failed", exc)
         raise
 
     try:
@@ -344,7 +344,7 @@ def _load_json_crew(crew_path: Path) -> tuple[Any, dict[str, Any]]:
     except (Exception, SystemExit) as exc:
         # A missing key is counted where the run stops for it.
         if _missing_api_key(exc) is None:
-            record_run_stopped("load_failed")
+            record_run_stopped("load_failed", exc)
         raise
 
 
@@ -650,13 +650,21 @@ def _record_deploy_button(event: DeployButtonEvent) -> None:
     _count_usage(f"cli_usage:{event}")
 
 
-def _count_usage(feature: str) -> None:
+def _count_usage(feature: str, attributes: dict[str, str] | None = None) -> None:
     try:
         from crewai_core.telemetry import Telemetry
 
         telemetry = Telemetry()
         telemetry.set_tracer()
-        telemetry.feature_usage_span(feature)
+        if attributes is None:
+            telemetry.feature_usage_span(feature)
+            return
+        try:
+            telemetry.feature_usage_span(feature, attributes=attributes)
+        except TypeError:
+            # A JSON crew's runner imports the project's crewai-core, which
+            # takes no attributes before 1.15.23: count the use without them.
+            telemetry.feature_usage_span(feature)
     except Exception:  # noqa: S110 - telemetry must never break a command
         pass
 
@@ -720,13 +728,79 @@ def _project_env_disables_telemetry() -> bool:
     )
 
 
-def _count_run_usage(event: str) -> None:
+def _count_run_usage(event: str, attributes: dict[str, str] | None = None) -> None:
     try:
         if _project_env_disables_telemetry():
             return
     except (OSError, ValueError):  # an unreadable .env: count nothing over guessing
         return
-    _count_usage(f"cli_usage:{event}")
+    _count_usage(f"cli_usage:{event}", attributes)
+
+
+# The top-level packages whose error classes a `load_failed` stop names: Python's
+# own, crewAI's, and those of the libraries crewAI loads a project with. Their
+# classes are the same in every project; a project's own can name it.
+_NAMED_ERROR_PACKAGES = frozenset(
+    {
+        "builtins",
+        "crewai",
+        "crewai_core",
+        "crewai_tools",
+        "pydantic",
+        # Where pydantic's ValidationError is defined.
+        "pydantic_core",
+        "json",
+        "yaml",
+        "importlib",
+        "click",
+        "litellm",
+        "openai",
+        "anthropic",
+        "google",
+        "httpx",
+    }
+)
+
+
+def _carried_error(error: BaseException) -> BaseException | None:
+    """The error ERROR was raised for, when ERROR only carries one: SystemExit,
+    the JSON crew loader's JSONProjectError, or a pydantic ValidationError a
+    validator's own error raised."""
+    if isinstance(error, SystemExit):
+        return error.__cause__ or error.__context__
+    # An error's class is defined in a module already loaded, so look these up
+    # there: counting a stop must never import crewAI (slow, and it loads a
+    # `.env`), nor need pydantic installed.
+    if sys.modules.get("crewai.project.json_loader") is not None:
+        from crewai.project.json_loader import JSONProjectError
+
+        if isinstance(error, JSONProjectError):
+            return error.__cause__
+    if sys.modules.get("pydantic_core") is not None:
+        from pydantic_core import ValidationError
+
+        if isinstance(error, ValidationError):
+            for detail in error.errors():
+                cause = detail.get("ctx", {}).get("error")
+                if isinstance(cause, BaseException):
+                    return cause
+    return None
+
+
+def _error_class(error: BaseException) -> str:
+    """The class of the error behind ERROR, by name when its top-level package
+    is in `_NAMED_ERROR_PACKAGES`, else `other`; never its message."""
+    seen: set[int] = set()
+    while id(error) not in seen:
+        seen.add(id(error))
+        carried = _carried_error(error)
+        if carried is None:
+            break
+        error = carried
+    error_type = type(error)
+    if error_type.__module__.partition(".")[0] in _NAMED_ERROR_PACKAGES:
+        return error_type.__name__
+    return "other"
 
 
 def record_run_started(kind: RunKind) -> None:
@@ -739,15 +813,24 @@ def record_run_started(kind: RunKind) -> None:
         _count_run_usage(f"run_started:{kind}")
 
 
-def record_run_stopped(reason: RunStopReason) -> None:
+def record_run_stopped(
+    reason: RunStopReason, error: BaseException | None = None
+) -> None:
     """Count a `crewai run` that stopped before kickoff, and where; or whose
     project script failed (`script_failed`); or whose JSON crew stopped, as it
     loaded or after kickoff, for an API key that is not set (`missing_api_key`).
 
-    The reason is a word from a closed list, never the error, which can carry
-    a path, a project name or the project's own code.
+    The reason is a word from a closed list. A `load_failed` stop also carries
+    the class of ERROR, the error the project failed to load with, as
+    `error_class`: the class behind a SystemExit, a JSONProjectError or a
+    pydantic ValidationError, by name when Python, crewAI or a library crewAI
+    loads projects with defines it, else `other`. Never the error's message,
+    which can carry a path, a project name or the project's own code.
     """
-    _count_run_usage(f"run_stopped:{reason}")
+    attributes = None
+    if reason == "load_failed" and error is not None:
+        attributes = {"error_class": _error_class(error)}
+    _count_run_usage(f"run_stopped:{reason}", attributes)
 
 
 @contextmanager
@@ -755,8 +838,8 @@ def stops_run_as(reason: RunStopReason) -> Iterator[None]:
     """Count the run as stopped for REASON when the block raises, then re-raise."""
     try:
         yield
-    except (Exception, SystemExit):
-        record_run_stopped(reason)
+    except (Exception, SystemExit) as error:
+        record_run_stopped(reason, error)
         raise
 
 
