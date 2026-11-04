@@ -418,7 +418,7 @@ def _run_json_crew_in_tui(
     return app, runtime_inputs
 
 
-def _ask_for_the_api_key(error: BaseException) -> None:
+def _ask_for_the_api_key(error: BaseException, crew_path: Path) -> None:
     """Ask for the API key ERROR was raised without, and save it; raise ERROR
     when it names none or none is pasted."""
     env_var = _missing_api_key(error)
@@ -426,7 +426,7 @@ def _ask_for_the_api_key(error: BaseException) -> None:
         raise error
     # Ctrl-C or Ctrl-D at the prompt stops the run there.
     with stops_run_as("missing_api_key"):
-        pasted = ask_for_api_key(env_var, Path.cwd())
+        pasted = ask_for_api_key(env_var, Path.cwd(), crew_path)
     if not pasted:
         raise error
 
@@ -470,12 +470,12 @@ def _run_json_crew(
         try:
             app, runtime_inputs = _run_json_crew_in_tui(crew_path, provided)
         except Exception as error:
-            _ask_for_the_api_key(error)
+            _ask_for_the_api_key(error, crew_path)
             app, runtime_inputs = _run_json_crew_in_tui(crew_path, provided)
         else:
             failure: Exception | None = getattr(app, "_failure", None)
             if failure is not None and _missing_api_key(failure):
-                _ask_for_the_api_key(failure)
+                _ask_for_the_api_key(failure, crew_path)
                 click.echo("Running the crew again from its first task.")
                 app, runtime_inputs = _run_json_crew_in_tui(crew_path, runtime_inputs)
         # The app only shows a failure; one for a missing key stops the run.

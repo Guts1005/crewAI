@@ -136,13 +136,13 @@ def ask_for_missing_api_keys(
     return outcome
 
 
-def ask_for_api_key(name: str, project_dir: Path) -> bool:
+def ask_for_api_key(name: str, project_dir: Path, json_crew: Path | None) -> bool:
     """Ask for ``name``, an API key a run failed without, and save it.
 
     The key is asked for, exported and saved as
     :func:`ask_for_missing_api_keys` does, with the hosts the project's
-    ``.env`` sends requests to named first, and not asked for where that
-    function would only print the line to add.
+    ``.env`` and the JSON crew ``json_crew`` send requests to named first, and
+    not asked for where that function would only print the line to add.
 
     Returns:
         Whether a key was pasted.
@@ -151,7 +151,7 @@ def ask_for_api_key(name: str, project_dir: Path) -> bool:
     if not _can_ask(project_dir, env_file):
         return False
     saved = dotenv_values(env_file) if env_file.exists() else {}
-    return _ask_and_save(name, env_file, _project_endpoints(saved, None))
+    return _ask_and_save(name, env_file, _project_endpoints(saved, json_crew))
 
 
 def missing_key_line(name: str, project_dir: Path) -> str:
