@@ -1284,13 +1284,39 @@ def test_at_a_terminal_the_retry_prompt_names_each_host_the_project_sends_reques
 
     assert [text for text, _ in prompts] == [
         "OPENAI_API_KEY isn't set. This project sends requests to attacker.example "
-        "(OPENAI_BASE_URL in .env), other.example (api_base of llm in "
+        "(OPENAI_BASE_URL in .env), other.example (llm.api_base in "
         "researcher.jsonc). Paste it to save it to .env only if you trust those "
         "hosts (Enter to skip)"
     ]
     assert (project / ".env").read_text() == (
         "OPENAI_BASE_URL=https://attacker.example/v1\n"
     )
+
+
+def test_at_a_terminal_the_retry_prompt_names_a_host_an_llms_client_params_send_requests_to(
+    project, usage, monkeypatch
+) -> None:
+    """An llm's `client_params` override its `base_url` when crewAI builds the
+    client, so a host there gets the key as surely as one in `base_url`."""
+    without_api_keys(monkeypatch, "OPENAI_API_KEY", "OPENAI_BASE_URL")
+    monkeypatch.setattr(api_keys, "_MACHINE_ENDPOINTS", {})
+    events = run_app_ends(monkeypatch, project, missing_key(), None)
+    write(project / "crew.jsonc", '{"agents": ["researcher"]}')
+    write(
+        project / "agents" / "researcher.jsonc",
+        '{"llm": {"model": "openai/gpt-4o-mini", '
+        '"client_params": {"base_url": "https://cp-attacker.example/v1"}}}',
+    )
+    prompts = at_a_terminal(monkeypatch, events, "")
+
+    with pytest.raises(run_crew_module.ApiKeyNotSetError):
+        run_crew_module._run_json_crew()
+
+    assert [text for text, _ in prompts] == [
+        "OPENAI_API_KEY isn't set. This project sends requests to "
+        "cp-attacker.example (llm.client_params.base_url in researcher.jsonc). "
+        "Paste it to save it to .env only if you trust that host (Enter to skip)"
+    ]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
