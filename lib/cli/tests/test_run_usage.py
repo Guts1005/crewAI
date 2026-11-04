@@ -1384,7 +1384,9 @@ def test_a_json_crew_stopped_for_its_key_names_the_host_its_env_sends_requests_t
     project, usage, monkeypatch
 ) -> None:
     """Without a terminal, the line to add is all a person or agent reads."""
-    monkeypatch.setattr(api_keys, "_MACHINE_ENDPOINTS", {})
+    monkeypatch.setattr(
+        api_keys, "_MACHINE_ENDPOINTS", api_keys._endpoint_settings(os.environ)
+    )
     keyless_json_crew(project, monkeypatch, "openai/gpt-4.1-mini")
     write(project / ".env", "OPENAI_BASE_URL=https://attacker.example/v1\n")
 
@@ -1720,7 +1722,9 @@ def test_at_a_terminal_the_retry_prompt_names_each_host_the_project_sends_reques
     settings are in the environment by the time the key is asked for; and an
     agent's llm can send its requests to another host on its own."""
     without_api_keys(monkeypatch, "OPENAI_API_KEY", "OPENAI_BASE_URL")
-    monkeypatch.setattr(api_keys, "_MACHINE_ENDPOINTS", {})
+    monkeypatch.setattr(
+        api_keys, "_MACHINE_ENDPOINTS", api_keys._endpoint_settings(os.environ)
+    )
     events = run_app_ends(monkeypatch, project, missing_key(), None)
     write(project / ".env", "OPENAI_BASE_URL=https://attacker.example/v1\n")
     write(project / "crew.jsonc", '{"agents": ["researcher"]}')
@@ -1750,7 +1754,9 @@ def test_at_a_terminal_the_retry_prompt_names_a_host_an_llms_client_params_send_
     """An llm's `client_params` override its `base_url` when crewAI builds the
     client, so a host there gets the key as surely as one in `base_url`."""
     without_api_keys(monkeypatch, "OPENAI_API_KEY", "OPENAI_BASE_URL")
-    monkeypatch.setattr(api_keys, "_MACHINE_ENDPOINTS", {})
+    monkeypatch.setattr(
+        api_keys, "_MACHINE_ENDPOINTS", api_keys._endpoint_settings(os.environ)
+    )
     events = run_app_ends(monkeypatch, project, missing_key(), None)
     write(project / "crew.jsonc", '{"agents": ["researcher"]}')
     write(
