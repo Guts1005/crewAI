@@ -232,7 +232,8 @@ def _resolve_crew_inputs(
     inputs = dict(default_inputs or {})
 
     for key, value in (provided or {}).items():
-        if key not in referenced:
+        # A key the crew declares is no typo, and a retry passes them all back.
+        if key not in referenced and key not in inputs:
             suggestion = closest_name(key, referenced)
             hint = f" Did you mean '{suggestion}'?" if suggestion else ""
             click.secho(

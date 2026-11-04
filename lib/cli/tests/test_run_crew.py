@@ -1037,6 +1037,21 @@ def test_resolve_crew_inputs_warns_and_keeps_unknown_input(capsys):
     assert "Did you mean 'topic'?" in captured.err
 
 
+def test_resolve_crew_inputs_does_not_flag_an_input_the_crew_declares(capsys):
+    """The retry after a pasted key passes back the crew's own defaults."""
+    crew = _crew_with_placeholders("topic")
+
+    resolved = run_crew_module._resolve_crew_inputs(
+        crew,
+        {"topic": "AI", "audience": "devs"},
+        {"topic": "ML", "audience": "devs"},
+        interactive=False,
+    )
+
+    assert resolved == {"topic": "ML", "audience": "devs"}
+    assert "isn't referenced" not in capsys.readouterr().err
+
+
 def test_resolve_crew_inputs_prompts_when_interactive(monkeypatch):
     crew = _crew_with_placeholders("topic")
     prompted: list[str] = []
