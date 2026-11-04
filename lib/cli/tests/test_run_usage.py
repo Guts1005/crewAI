@@ -448,6 +448,25 @@ def test_a_json_crew_definition_that_cannot_be_loaded(
     assert error_classes == ["JSONDecodeError"]
 
 
+def test_an_error_class_that_cannot_be_read_never_replaces_the_load_error(
+    project, usage, error_classes, monkeypatch
+) -> None:
+    """Counting is best effort: the run must stop with its own error."""
+    crew_path = write(project / "crew.jsonc", '{"agents": "not a list"')
+
+    def unreadable(error: BaseException) -> str:
+        raise RuntimeError("classifying failed")
+
+    monkeypatch.setattr(run_crew_module, "_error_class", unreadable)
+
+    with pytest.raises(Exception) as raised:  # noqa: B017 - the loader's own error
+        run_crew_module._load_json_crew(crew_path)
+
+    assert "classifying failed" not in str(raised.value)
+    assert usage == [stopped("load_failed")]
+    assert error_classes == [None]
+
+
 def test_a_python_flow_module_that_does_not_import(
     project, usage, error_classes, monkeypatch
 ) -> None:

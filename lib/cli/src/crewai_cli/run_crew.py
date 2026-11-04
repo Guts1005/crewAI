@@ -836,7 +836,12 @@ def record_run_stopped(
     """
     attributes = None
     if reason == "load_failed" and error is not None:
-        attributes = {"error_class": _error_class(error)}
+        try:
+            attributes = {"error_class": _error_class(error)}
+        except Exception:
+            # Counting must never replace the error the run stopped with; a
+            # class that cannot be read is counted without one.
+            attributes = None
     _count_run_usage(f"run_stopped:{reason}", attributes)
 
 
