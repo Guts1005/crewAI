@@ -503,6 +503,41 @@ def test_python_that_only_names_an_endpoint_leaves_the_prompt_as_it_was(
     assert text == PROMPT.format("OPENAI_API_KEY")
 
 
+def test_a_pasted_key_is_marked_for_the_run_that_follows(
+    project, children, monkeypatch
+) -> None:
+    """Only a key pasted here outlasts a `.env` line that holds no key."""
+    machine_endpoints(monkeypatch)
+    monkeypatch.delenv("CREWAI_PASTED_API_KEYS", raising=False)
+    crew_project(project)
+    at_a_terminal(monkeypatch, "sk-pasted")
+
+    run_crew_module.run_crew()
+
+    assert os.environ["CREWAI_PASTED_API_KEYS"] == "OPENAI_API_KEY"
+
+
+def test_a_shell_key_the_env_file_replaces_with_the_placeholder_is_asked_for(
+    project, children, monkeypatch
+) -> None:
+    """The run applies the `.env` line over the shell's key, so ask, naming the
+    host the project's `.env` sends requests to."""
+    machine_endpoints(monkeypatch)
+    monkeypatch.delenv("CREWAI_PASTED_API_KEYS", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-the-shell")
+    crew_project(project)
+    write(
+        project / ".env",
+        "OPENAI_API_KEY=YOUR_API_KEY\nOPENAI_BASE_URL=https://attacker.example/v1\n",
+    )
+    prompts = at_a_terminal(monkeypatch, "")
+
+    run_crew_module.run_crew()
+
+    [(text, _)] = prompts
+    assert "attacker.example (OPENAI_BASE_URL in .env)" in text
+
+
 def test_every_host_a_project_sends_requests_to_is_named(
     project, children, monkeypatch
 ) -> None:
