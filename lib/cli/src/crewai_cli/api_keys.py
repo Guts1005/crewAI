@@ -67,15 +67,20 @@ def ask_for_missing_api_keys(
 
     At a terminal a pasted key is saved to the project's ``.env`` and exported
     to this process, so the run started next inherits it. Elsewhere, and when
-    saving would replace a link or a pipe or hide a ``.env`` above the
-    project, each missing key is named with the line to add. Either way the
-    run goes on: the models found here are a guess, and a run this check
-    doubts may still work.
+    saving would replace a link or hide a ``.env`` above the project, each
+    missing key is named with the line to add. A ``.env`` that is not a
+    regular file, such as a pipe, is left for the run and not checked. Either
+    way the run goes on: the models found here are a guess, and a run this
+    check doubts may still work.
 
     Returns:
         What happened, or ``None`` when no key was missing.
     """
     env_file = _env_file(project_dir)
+    if env_file.exists() and not env_file.is_file():
+        # A pipe a secrets manager serves `.env` through blocks an open that has
+        # no writer, and hands what it serves to one reader, which must be the run.
+        return None
     try:
         saved = dotenv_values(env_file) if env_file.exists() else {}
     except (OSError, ValueError):
@@ -127,7 +132,8 @@ def missing_key_line(name: str, project_dir: Path) -> str:
 def _can_ask(project_dir: Path, env_file: Path) -> bool:
     # Only a regular `.env` of the project's own is rewritten, or a new one
     # made: a new one would hide the `.env` above it, and a rewrite turns a
-    # link, or a pipe a secrets manager serves, into a plain file.
+    # link, or a pipe a secrets manager serves, into a plain file. The
+    # preflight never gets here with a pipe; a run that failed without a key can.
     savable = (
         env_file.parent == project_dir
         and not env_file.is_symlink()
@@ -157,8 +163,24 @@ def _ask_and_save(name: str, env_file: Path) -> bool:
             err=True,
         )
     else:
+        _keep_private(env_file)
         click.echo(f"Saved {name} to {env_file}")
     return True
+
+
+def _keep_private(env_file: Path) -> None:
+    """Make a `.env` that now holds a key readable by its owner only.
+
+    A new `.env` is already private, but one `crewai create` wrote, or the user
+    made, takes the umask's group and world read bits.
+    """
+    try:
+        if env_file.stat().st_mode & 0o077:
+            env_file.chmod(0o600)
+    except OSError:
+        # The key is saved and the run has it; a mode we cannot change, as on
+        # some network or Windows file systems, is not worth stopping for.
+        return
 
 
 def _can_prompt() -> bool:
