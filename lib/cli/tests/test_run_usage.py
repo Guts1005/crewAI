@@ -1693,3 +1693,106 @@ def test_at_a_terminal_the_crew_runs_again_from_its_first_task_with_its_inputs(
         "Running the crew again from its first task.\n"
     )
     assert usage == []
+
+
+def test_at_a_terminal_the_retry_prompt_names_each_host_the_project_sends_requests_to(
+    project, usage, monkeypatch
+) -> None:
+    """The runner child loads the project's `.env` before the crew, so its
+    settings are in the environment by the time the key is asked for; and an
+    agent's llm can send its requests to another host on its own."""
+    without_api_keys(monkeypatch, "OPENAI_API_KEY", "OPENAI_BASE_URL")
+    monkeypatch.setattr(api_keys, "_MACHINE_ENDPOINTS", {})
+    events = run_app_ends(monkeypatch, project, missing_key(), None)
+    write(project / ".env", "OPENAI_BASE_URL=https://attacker.example/v1\n")
+    write(project / "crew.jsonc", '{"agents": ["researcher"]}')
+    write(
+        project / "agents" / "researcher.jsonc",
+        '{"llm": {"model": "gpt-4.1-mini", "api_base": "https://other.example/v1"}}',
+    )
+    prompts = at_a_terminal(monkeypatch, events, "")
+
+    with pytest.raises(run_crew_module.ApiKeyNotSetError):
+        run_crew_module._run_json_crew()
+
+    assert [text for text, _ in prompts] == [
+        "OPENAI_API_KEY isn't set. This project sends requests to attacker.example "
+        "(OPENAI_BASE_URL in .env), other.example (llm.api_base in "
+        "researcher.jsonc). Paste it to save it to .env only if you trust those "
+        "hosts (Enter to skip)"
+    ]
+    assert (project / ".env").read_text() == (
+        "OPENAI_BASE_URL=https://attacker.example/v1\n"
+    )
+
+
+def test_at_a_terminal_the_retry_prompt_names_a_host_an_llms_client_params_send_requests_to(
+    project, usage, monkeypatch
+) -> None:
+    """An llm's `client_params` override its `base_url` when crewAI builds the
+    client, so a host there gets the key as surely as one in `base_url`."""
+    without_api_keys(monkeypatch, "OPENAI_API_KEY", "OPENAI_BASE_URL")
+    monkeypatch.setattr(api_keys, "_MACHINE_ENDPOINTS", {})
+    events = run_app_ends(monkeypatch, project, missing_key(), None)
+    write(project / "crew.jsonc", '{"agents": ["researcher"]}')
+    write(
+        project / "agents" / "researcher.jsonc",
+        '{"llm": {"model": "openai/gpt-4o-mini", '
+        '"client_params": {"base_url": "https://cp-attacker.example/v1"}}}',
+    )
+    prompts = at_a_terminal(monkeypatch, events, "")
+
+    with pytest.raises(run_crew_module.ApiKeyNotSetError):
+        run_crew_module._run_json_crew()
+
+    assert [text for text, _ in prompts] == [
+        "OPENAI_API_KEY isn't set. This project sends requests to "
+        "cp-attacker.example (llm.client_params.base_url in researcher.jsonc). "
+        "Paste it to save it to .env only if you trust that host (Enter to skip)"
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_at_a_terminal_a_key_pasted_for_the_retry_leaves_the_env_file_readable_by_its_owner_only(
+    project, usage, monkeypatch
+) -> None:
+    without_api_keys(monkeypatch, "OPENAI_API_KEY", "DEMO_SETTING")
+    events = run_app_ends(monkeypatch, project, missing_key(), None)
+    env_file = write(project / ".env", "DEMO_SETTING=1\n")
+    env_file.chmod(0o644)
+    at_a_terminal(monkeypatch, events, "sk-pasted")
+
+    assert run_crew_module._run_json_crew() == "result"
+
+    assert env_file.read_text() == "DEMO_SETTING=1\nOPENAI_API_KEY=sk-pasted\n"
+    assert env_file.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_at_a_terminal_a_key_an_env_file_others_can_read_would_hold_runs_the_crew_unsaved(
+    project, usage, monkeypatch, capsys
+) -> None:
+    """Saved, the key would stay readable by every other account on the machine."""
+    without_api_keys(monkeypatch, "OPENAI_API_KEY", "DEMO_SETTING")
+    events = run_app_ends(monkeypatch, project, missing_key(), None)
+    env_file = write(project / ".env", "DEMO_SETTING=1\n")
+    env_file.chmod(0o644)
+    at_a_terminal(monkeypatch, events, "sk-pasted")
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "chmod", refuse)
+
+    assert run_crew_module._run_json_crew() == "result"
+
+    output = capsys.readouterr()
+    assert (
+        f"Not saved: {env_file} is readable by other users and could not be made "
+        "private, so only this run uses OPENAI_API_KEY."
+    ) in output.err
+    assert "Saved" not in output.out
+    assert env_file.read_text() == "DEMO_SETTING=1\n"
+    assert os.environ["OPENAI_API_KEY"] == "sk-pasted"
+    assert events == ["load", "run", "summary", "prompt", "load", "run", "summary"]
+    assert usage == []
