@@ -48,6 +48,12 @@ _JSONC_STRING_OR_COMMENT = re.compile(
 )
 _JSONC_STRING_OR_TRAILING_COMMA = re.compile(r'("(?:\\.|[^"\\])*")|,(?=\s*[}\]])')
 _YAML_LLM = re.compile(r"""^[ \t]+llm:[ \t]*["']?([^"'#\s]+)""", re.MULTILINE)
+# Any `key: value` line of a crew's YAML config, at any depth, so an llm
+# mapping's `client_params` is read too. Flow-style `{...}` mappings are not.
+_YAML_SETTING = re.compile(
+    r"""^[ \t]*["']?([A-Za-z_][\w-]*)["']?[ \t]*:[ \t]*["']?([^"'#\s]+)""",
+    re.MULTILINE,
+)
 # An llm passed in Python code, whose model this check cannot read.
 _CODE_LLM = re.compile(r"\bllm\s*=|\bLLM\(")
 # Settings that send a model's requests to another host: the provider SDKs'
@@ -67,9 +73,14 @@ def _sets_endpoint(name: str) -> bool:
 # Those settings as this process started: the user's own. Every command loads a
 # project's `.env` with `run_crew.load_project_env`, and importing `run_crew`
 # imports this module first, so none of the `.env` is here yet.
-_MACHINE_ENDPOINTS = {
-    name: value for name, value in os.environ.items() if _sets_endpoint(name)
-}
+def _endpoint_settings(environ: Mapping[str, str]) -> dict[str, str]:
+    """ENVIRON's endpoint and proxy settings, keyed by upper-case name."""
+    return {
+        name.upper(): value for name, value in environ.items() if _sets_endpoint(name)
+    }
+
+
+_MACHINE_ENDPOINTS = _endpoint_settings(os.environ)
 
 
 def ask_for_missing_api_keys(
@@ -130,7 +141,7 @@ def ask_for_missing_api_keys(
             )
         return "warned"
 
-    endpoints = _project_endpoints(saved, json_crew)
+    endpoints = _project_endpoints(saved, json_crew, project_dir)
     outcome: ApiKeyOutcome = "skipped"
     for name in missing:
         if _ask_and_save(name, env_file, endpoints):
@@ -153,7 +164,9 @@ def ask_for_api_key(name: str, project_dir: Path, json_crew: Path | None) -> boo
     if not _can_ask(project_dir, env_file):
         return False
     saved = dotenv_values(env_file) if env_file.exists() else {}
-    return _ask_and_save(name, env_file, _project_endpoints(saved, json_crew))
+    return _ask_and_save(
+        name, env_file, _project_endpoints(saved, json_crew, project_dir)
+    )
 
 
 def missing_key_line(
@@ -170,7 +183,7 @@ def missing_key_line(
     return (
         f"{name} is not set. Add {name}=<your key> to {env_file}, "
         "then run `crewai run` again."
-        f"{_endpoint_warning(_project_endpoints(saved, json_crew))}"
+        f"{_endpoint_warning(_project_endpoints(saved, json_crew, project_dir))}"
     )
 
 
@@ -241,20 +254,30 @@ def _key_prompt(name: str, endpoints: list[str]) -> str:
 
 
 def _project_endpoints(
-    saved: Mapping[str, str | None], json_crew: Path | None
+    saved: Mapping[str, str | None], json_crew: Path | None, project_dir: Path
 ) -> list[str]:
-    """Where the project's `.env` and JSON crew send model requests that the
-    machine's own environment does not, each as `host (setting)`."""
+    """Where the project's `.env`, JSON crew or agents.yaml send model requests
+    that the machine's own environment does not, each as `host (setting)`."""
     found = [
         (value, f"{name} in .env")
         for name, value in saved.items()
-        if value and _sets_endpoint(name) and value != _MACHINE_ENDPOINTS.get(name)
+        if value
+        and _sets_endpoint(name)
+        # httpx reads `https_proxy` and `HTTPS_PROXY` alike.
+        and value != _MACHINE_ENDPOINTS.get(name.upper())
     ]
     if json_crew:
         found += [
             (value, f"{where} in {path.name}")
             for path, definition in _json_crew_files(json_crew)
             for value, where in _json_endpoints(definition, "")
+        ]
+    else:
+        found += [
+            (value, f"{key} in {path.relative_to(project_dir)}")
+            for path in sorted((project_dir / "src").glob("**/config/agents.yaml"))
+            for key, value in _YAML_SETTING.findall(_text(path))
+            if _sets_endpoint(key) or key.lower() == "endpoint"
         ]
     # Escaped: a control character the project put in a setting could move the
     # cursor and print over the host.
