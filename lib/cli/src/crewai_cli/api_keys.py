@@ -125,7 +125,9 @@ def ask_for_missing_api_keys(
 
     if not _can_ask(project_dir, env_file):
         for name in missing:
-            click.secho(missing_key_line(name, project_dir), fg="yellow", err=True)
+            click.secho(
+                missing_key_line(name, project_dir, json_crew), fg="yellow", err=True
+            )
         return "warned"
 
     endpoints = _project_endpoints(saved, json_crew)
@@ -154,11 +156,21 @@ def ask_for_api_key(name: str, project_dir: Path, json_crew: Path | None) -> boo
     return _ask_and_save(name, env_file, _project_endpoints(saved, json_crew))
 
 
-def missing_key_line(name: str, project_dir: Path) -> str:
-    """The line that tells how to set ``name`` for the project's runs."""
+def missing_key_line(
+    name: str, project_dir: Path, json_crew: Path | None = None
+) -> str:
+    """The line that tells how to set ``name`` for the project's runs, naming
+    the hosts the project's ``.env`` and JSON crew ``json_crew`` send requests to."""
+    env_file = _env_file(project_dir)
+    try:
+        # Not a pipe: what a secrets manager serves through one is the run's.
+        saved = dotenv_values(env_file) if env_file.is_file() else {}
+    except (OSError, ValueError):
+        saved = {}
     return (
-        f"{name} is not set. Add {name}=<your key> to {_env_file(project_dir)}, "
+        f"{name} is not set. Add {name}=<your key> to {env_file}, "
         "then run `crewai run` again."
+        f"{_endpoint_warning(_project_endpoints(saved, json_crew))}"
     )
 
 
@@ -206,6 +218,16 @@ def _ask_and_save(name: str, env_file: Path, endpoints: list[str]) -> bool:
         return True
     click.echo(f"Saved {name} to {env_file}")
     return True
+
+
+def _endpoint_warning(endpoints: list[str]) -> str:
+    if not endpoints:
+        return ""
+    hosts = "that host" if len(endpoints) == 1 else "those hosts"
+    return (
+        f" This project sends requests to {', '.join(endpoints)}; "
+        f"add the key only if you trust {hosts}."
+    )
 
 
 def _key_prompt(name: str, endpoints: list[str]) -> str:

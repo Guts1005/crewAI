@@ -283,8 +283,8 @@ def _json_loading_status(message: str) -> AbstractContextManager[Any]:
 class ApiKeyNotSetError(click.ClickException):
     """A JSON crew's run stopped because a model's API key is not set."""
 
-    def __init__(self, env_var: str) -> None:
-        super().__init__(missing_key_line(env_var, Path.cwd()))
+    def __init__(self, env_var: str, json_crew: Path) -> None:
+        super().__init__(missing_key_line(env_var, Path.cwd(), json_crew))
 
 
 def _missing_api_key(error: BaseException | None) -> str | None:
@@ -317,7 +317,7 @@ def _missing_api_key(error: BaseException | None) -> str | None:
 
 
 @contextmanager
-def _stops_for_a_missing_api_key() -> Iterator[None]:
+def _stops_for_a_missing_api_key(json_crew: Path) -> Iterator[None]:
     """Stop the run with the line that sets the API key the block failed
     without, instead of a traceback; anything else raises as it is."""
     try:
@@ -327,7 +327,7 @@ def _stops_for_a_missing_api_key() -> Iterator[None]:
         if env_var is None:
             raise
         record_run_stopped("missing_api_key")
-        raise ApiKeyNotSetError(env_var) from error
+        raise ApiKeyNotSetError(env_var, json_crew) from error
 
 
 def _load_json_crew(crew_path: Path) -> tuple[Any, dict[str, Any]]:
@@ -460,13 +460,13 @@ def _run_json_crew(
     # agent, CI, piped input, CREWAI_DMN) the crew runs on plain output and the
     # command exits when it finishes, as declarative flows do.
     if not is_interactive():
-        with _stops_for_a_missing_api_key():
+        with _stops_for_a_missing_api_key(crew_path):
             return _run_json_crew_without_tui(crew_path, provided)
 
     # A missing key is asked for once, and the crew built again and run once
     # more: its agents spent their retries, and a model built without the key
     # keeps none.
-    with _stops_for_a_missing_api_key():
+    with _stops_for_a_missing_api_key(crew_path):
         try:
             app, runtime_inputs = _run_json_crew_in_tui(crew_path, provided)
         except Exception as error:
