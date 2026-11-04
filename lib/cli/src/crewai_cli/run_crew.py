@@ -118,6 +118,10 @@ try:
 except module.click.ClickException as exc:
     exc.show()
     raise SystemExit(exc.exit_code)
+except module.click.Abort:
+    # Ctrl-C or Ctrl-D at a prompt, ended as click ends its own commands.
+    module.click.echo("Aborted!", err=True)
+    raise SystemExit(1)
 """.strip()
 
 
@@ -295,7 +299,11 @@ def _missing_api_key(error: BaseException | None) -> str | None:
         return None
     from pydantic import ValidationError
 
-    while error is not None:
+    # crewAI's providers re-raise with `raise e from e`, which makes an error
+    # its own cause.
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
         if isinstance(error, MissingAPIKeyError):
             return error.env_var
         if isinstance(error, ValidationError):
@@ -386,11 +394,7 @@ def _run_json_crew_without_tui(crew_path: Path, provided: dict[str, Any] | None)
 def _run_json_crew_in_tui(
     crew_path: Path, provided: dict[str, Any] | None
 ) -> tuple[CrewRunApp, dict[str, Any]]:
-    """Run a JSON-defined crew in the run app; returns the app and the inputs.
-
-    A kickoff that failed for a missing API key, which the app only shows, is
-    raised once the app has closed.
-    """
+    """Run a JSON-defined crew in the run app; returns the app and the inputs."""
     crew_run_app_cls, crew, default_inputs, task_names, agent_names = (
         _load_json_crew_for_tui(crew_path)
     )
@@ -410,11 +414,20 @@ def _run_json_crew_in_tui(
     app.run()
 
     _print_post_tui_summary(app)
-
-    failure = getattr(app, "_failure", None)
-    if failure is not None and _missing_api_key(failure):
-        raise failure
     return app, runtime_inputs
+
+
+def _ask_for_the_api_key(error: BaseException) -> None:
+    """Ask for the API key ERROR was raised without, and save it; raise ERROR
+    when it names none or none is pasted."""
+    env_var = _missing_api_key(error)
+    if env_var is None:
+        raise error
+    # Ctrl-C or Ctrl-D at the prompt stops the run there.
+    with stops_run_as("missing_api_key"):
+        pasted = ask_for_api_key(env_var, Path.cwd())
+    if not pasted:
+        raise error
 
 
 def _run_json_crew(
@@ -449,16 +462,25 @@ def _run_json_crew(
         with _stops_for_a_missing_api_key():
             return _run_json_crew_without_tui(crew_path, provided)
 
+    # A missing key is asked for once, and the crew built again and run once
+    # more: its agents spent their retries, and a model built without the key
+    # keeps none.
     with _stops_for_a_missing_api_key():
         try:
             app, runtime_inputs = _run_json_crew_in_tui(crew_path, provided)
         except Exception as error:
-            env_var = _missing_api_key(error)
-            if env_var is None or not ask_for_api_key(env_var, Path.cwd()):
-                raise
-            # Once, on a crew built again: its agents spent their retries, and
-            # a model built without the key keeps none.
+            _ask_for_the_api_key(error)
             app, runtime_inputs = _run_json_crew_in_tui(crew_path, provided)
+        else:
+            failure: Exception | None = getattr(app, "_failure", None)
+            if failure is not None and _missing_api_key(failure):
+                _ask_for_the_api_key(failure)
+                click.echo("Running the crew again from its first task.")
+                app, runtime_inputs = _run_json_crew_in_tui(crew_path, runtime_inputs)
+        # The app only shows a failure; one for a missing key stops the run.
+        failure = getattr(app, "_failure", None)
+        if failure is not None and _missing_api_key(failure):
+            raise failure
 
     if app._status == "failed":
         # Mirror the classic subprocess path: a failed crew must produce a

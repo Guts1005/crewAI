@@ -502,6 +502,22 @@ def test_json_runner_stops_a_crew_without_its_key_with_one_line(tmp_path: Path):
     assert "Traceback" not in result.stderr
 
 
+def test_json_runner_ends_a_quit_prompt_as_click_ends_its_commands(tmp_path: Path):
+    """Ctrl-C or Ctrl-D at a prompt in the runner, the API key's included."""
+    result = _run_the_json_runner_on_crewai(
+        tmp_path,
+        {
+            "project/crew_loader.py": _crew_loader_whose_kickoff_raises(
+                "click.Abort()", imports="import click"
+            )
+        },
+    )
+
+    assert result.returncode == 1
+    assert result.stderr.splitlines()[-1] == "Aborted!"
+    assert "Traceback" not in result.stderr
+
+
 def test_json_runner_on_a_crewai_without_missing_api_key_error_fails_as_before(
     tmp_path: Path,
 ):

@@ -7,7 +7,7 @@ Every count is a name from a closed list (`RunKind`, `RunStopReason`); the
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import os
 from pathlib import Path
 import subprocess
@@ -917,6 +917,15 @@ def missing_key(name: str = "OPENAI_API_KEY") -> Exception:
     return MissingAPIKeyError(name, "gpt-4.1-mini")
 
 
+def its_own_cause(error: Exception) -> Exception:
+    """ERROR as crewAI's providers re-raise a failed call: `raise e from e`."""
+    try:
+        raise error from error
+    except Exception as raised:
+        assert raised.__cause__ is raised
+        return raised
+
+
 @pytest.mark.parametrize(
     ("llm", "name"),
     [("openai/gpt-4.1-mini", "OPENAI_API_KEY"), ("deepseek/deepseek-chat", "DEEPSEEK_API_KEY")],
@@ -942,8 +951,14 @@ def test_a_json_crew_without_its_key_stops_with_the_line_to_add(
 
 @pytest.mark.parametrize(
     "error",
-    # What a crewai older than MissingAPIKeyError raised for a missing key.
-    [RuntimeError("the crew failed"), ValueError("OPENAI_API_KEY is required")],
+    [
+        RuntimeError("the crew failed"),
+        # What a crewai older than MissingAPIKeyError raised for a missing key.
+        ValueError("OPENAI_API_KEY is required"),
+        # A wrong key or a rate limit, as the providers raise it.
+        its_own_cause(RuntimeError("Error code: 401 - invalid x-api-key")),
+    ],
+    ids=["failed", "older_crewai", "its_own_cause"],
 )
 def test_a_json_crew_that_fails_at_kickoff_for_another_reason_raises_as_before(
     project, usage, monkeypatch, error
@@ -974,6 +989,32 @@ def test_a_json_crew_that_does_not_load_for_another_reason_counts_load_failed(
     with pytest.raises(Exception, match="crew.jsonc"):
         run_crew_module._run_json_crew()
 
+    assert usage == [stopped("load_failed")]
+
+
+@pytest.mark.parametrize("terminal", [False, True], ids=["headless", "at_a_terminal"])
+def test_a_json_crew_that_does_not_load_for_an_error_that_is_its_own_cause_counts_load_failed(
+    project, usage, monkeypatch, terminal
+) -> None:
+    from crewai.project import crew_loader
+
+    error = its_own_cause(RuntimeError("Error code: 401 - invalid x-api-key"))
+
+    def load_crew(_path: Path) -> None:
+        raise error
+
+    json_crew_project(project)
+    monkeypatch.setattr(crew_loader, "load_crew", load_crew)
+    if terminal:
+        monkeypatch.setattr(
+            run_crew_module, "_json_loading_status", lambda _message: nullcontext()
+        )
+        at_a_terminal(monkeypatch, [])
+
+    with pytest.raises(RuntimeError, match="invalid x-api-key") as raised:
+        run_crew_module._run_json_crew()
+
+    assert raised.value is error
     assert usage == [stopped("load_failed")]
 
 
@@ -1087,10 +1128,18 @@ def test_at_a_terminal_whose_output_is_captured_the_line_is_given_not_asked(
     assert usage == [stopped("missing_api_key")]
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("the crew failed"),
+        its_own_cause(RuntimeError("Error code: 401 - invalid x-api-key")),
+    ],
+    ids=["failed", "its_own_cause"],
+)
 def test_at_a_terminal_any_other_failure_exits_as_before(
-    project, usage, monkeypatch
+    project, usage, monkeypatch, failure
 ) -> None:
-    events = run_app_ends(monkeypatch, project, RuntimeError("the crew failed"))
+    events = run_app_ends(monkeypatch, project, failure)
     at_a_terminal(monkeypatch, events)
 
     with pytest.raises(SystemExit) as exited:
@@ -1141,4 +1190,73 @@ def test_at_a_terminal_a_key_missing_as_the_crew_loads_is_asked_for_after_the_sp
     ]
     assert (project / ".env").read_text() == "DEEPSEEK_API_KEY=sk-deepseek\n"
     # Neither load_failed for the first load nor a stop for the run.
+    assert usage == []
+
+
+@pytest.mark.parametrize("where", ["at_kickoff", "as_it_loads"])
+def test_at_a_terminal_quitting_at_the_key_prompt_counts_the_stop(
+    project, usage, monkeypatch, where
+) -> None:
+    """Ctrl-C or Ctrl-D at the prompt stops the run for the key, counted once:
+    a crew that did not load counts no load_failed for it either."""
+    if where == "at_kickoff":
+        without_api_keys(monkeypatch, "OPENAI_API_KEY")
+        events = run_app_ends(monkeypatch, project, missing_key())
+    else:
+        keyless_json_crew(project, monkeypatch, "deepseek/deepseek-chat")
+        monkeypatch.setattr(
+            run_crew_module, "_json_loading_status", lambda _message: nullcontext()
+        )
+        events = []
+    at_a_terminal(monkeypatch, events)
+
+    def quit_at_the_prompt(*args: Any, **kwargs: Any) -> str:
+        raise click.Abort
+
+    monkeypatch.setattr(click, "prompt", quit_at_the_prompt)
+
+    with pytest.raises(click.Abort):
+        run_crew_module._run_json_crew()
+
+    assert usage == [stopped("missing_api_key")]
+    assert not (project / ".env").exists()
+
+
+def test_at_a_terminal_the_crew_runs_again_from_its_first_task_with_its_inputs(
+    project, usage, monkeypatch, capsys
+) -> None:
+    """A key pasted after kickoff runs finished tasks again: the CLI says so,
+    and does not ask again for the inputs given to the first run."""
+    without_api_keys(monkeypatch, "OPENAI_API_KEY")
+    events = run_app_ends(monkeypatch, project, missing_key(), None)
+    load = run_crew_module._load_json_crew_for_tui
+
+    def load_a_crew_with_a_placeholder(path: Path) -> tuple[Any, ...]:
+        run_app, *_ = load(path)
+        task = SimpleNamespace(description="Research {topic}")
+        return run_app, SimpleNamespace(name="Demo", tasks=[task], agents=[]), {}, [], []
+
+    monkeypatch.setattr(
+        run_crew_module, "_load_json_crew_for_tui", load_a_crew_with_a_placeholder
+    )
+    prompts = at_a_terminal(monkeypatch, events, "AI agents", "sk-pasted")
+
+    assert run_crew_module._run_json_crew() == "result"
+
+    assert events == [
+        "load",
+        "prompt",
+        "run",
+        "summary",
+        "prompt",
+        "load",
+        "run",
+        "summary",
+    ]
+    assert "topic" in prompts[0][0]
+    assert prompts[1][0] == PROMPT.format("OPENAI_API_KEY")
+    assert capsys.readouterr().out.endswith(
+        f"Saved OPENAI_API_KEY to {project / '.env'}\n"
+        "Running the crew again from its first task.\n"
+    )
     assert usage == []
