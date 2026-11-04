@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Literal
+from urllib.parse import urlsplit
 
 import click
 from dotenv import dotenv_values, set_key
@@ -49,6 +50,27 @@ _JSONC_STRING_OR_TRAILING_COMMA = re.compile(r'("(?:\\.|[^"\\])*")|,(?=\s*[}\]])
 _YAML_LLM = re.compile(r"""^[ \t]+llm:[ \t]*["']?([^"'#\s]+)""", re.MULTILINE)
 # An llm passed in Python code, whose model this check cannot read.
 _CODE_LLM = re.compile(r"\bllm\s*=|\bLLM\(")
+# Settings that send a model's requests to another host: the provider SDKs'
+# `*_BASE_URL`, LiteLLM's `*_API_BASE`, Azure's `*_ENDPOINT`, crewAI's own
+# `BASE_URL` and `API_BASE` (crewai/utilities/llm_utils.py), and a proxy.
+_ENDPOINT_NAMES = frozenset(
+    {"BASE_URL", "API_BASE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"}
+)
+_ENDPOINT_SUFFIXES = ("_BASE_URL", "_API_BASE", "_ENDPOINT")
+_JSON_LLM_ENDPOINTS = ("base_url", "api_base")
+
+
+def _sets_endpoint(name: str) -> bool:
+    upper = name.upper()
+    return upper in _ENDPOINT_NAMES or upper.endswith(_ENDPOINT_SUFFIXES)
+
+
+# Those settings as this process started: the user's own. Every command loads a
+# project's `.env` with `run_crew.load_project_env`, and importing `run_crew`
+# imports this module first, so none of the `.env` is here yet.
+_MACHINE_ENDPOINTS = {
+    name: value for name, value in os.environ.items() if _sets_endpoint(name)
+}
 
 
 def ask_for_missing_api_keys(
@@ -66,7 +88,13 @@ def ask_for_missing_api_keys(
     providers that take a single key are checked.
 
     At a terminal a pasted key is saved to the project's ``.env`` and exported
-    to this process, so the run started next inherits it. Elsewhere, and when
+    to this process, so the run started next inherits it. When the project's
+    ``.env`` or JSON crew sends model requests to another host, through a
+    ``*_BASE_URL``, ``*_API_BASE`` or ``*_ENDPOINT`` setting or a proxy that the
+    machine's own environment does not set, or an llm's ``base_url`` or
+    ``api_base``, the prompt names each host first. A key is only saved to a
+    ``.env`` its owner alone can read: when one that others can read cannot be
+    made private, the key is used for this run only. Elsewhere, and when
     saving would replace a link or hide a ``.env`` above the project, each
     missing key is named with the line to add. A ``.env`` that is not a
     regular file, such as a pipe, is left for the run and not checked. Either
@@ -100,9 +128,10 @@ def ask_for_missing_api_keys(
             click.secho(missing_key_line(name, project_dir), fg="yellow", err=True)
         return "warned"
 
+    endpoints = _project_endpoints(saved, json_crew)
     outcome: ApiKeyOutcome = "skipped"
     for name in missing:
-        if _ask_and_save(name, env_file):
+        if _ask_and_save(name, env_file, endpoints):
             outcome = "saved"
     return outcome
 
@@ -111,14 +140,18 @@ def ask_for_api_key(name: str, project_dir: Path) -> bool:
     """Ask for ``name``, an API key a run failed without, and save it.
 
     The key is asked for, exported and saved as
-    :func:`ask_for_missing_api_keys` does, and not asked for where that
+    :func:`ask_for_missing_api_keys` does, with the hosts the project's
+    ``.env`` sends requests to named first, and not asked for where that
     function would only print the line to add.
 
     Returns:
         Whether a key was pasted.
     """
     env_file = _env_file(project_dir)
-    return _can_ask(project_dir, env_file) and _ask_and_save(name, env_file)
+    if not _can_ask(project_dir, env_file):
+        return False
+    saved = dotenv_values(env_file) if env_file.exists() else {}
+    return _ask_and_save(name, env_file, _project_endpoints(saved, None))
 
 
 def missing_key_line(name: str, project_dir: Path) -> str:
@@ -142,9 +175,9 @@ def _can_ask(project_dir: Path, env_file: Path) -> bool:
     return savable and _can_prompt()
 
 
-def _ask_and_save(name: str, env_file: Path) -> bool:
+def _ask_and_save(name: str, env_file: Path, endpoints: list[str]) -> bool:
     value = click.prompt(
-        f"{name} isn't set. Paste it to save it to .env (Enter to skip)",
+        _key_prompt(name, endpoints),
         hide_input=True,
         default="",
         show_default=False,
@@ -153,6 +186,14 @@ def _ask_and_save(name: str, env_file: Path) -> bool:
         return False
     os.environ[name] = value
     try:
+        if not _keep_private(env_file):
+            click.secho(
+                f"Not saved: {env_file} is readable by other users and could "
+                f"not be made private, so only this run uses {name}.",
+                fg="yellow",
+                err=True,
+            )
+            return True
         set_key(env_file, name, value, quote_mode="never")
     except OSError as error:
         # The run has the key either way; only the next run will not.
@@ -162,25 +203,74 @@ def _ask_and_save(name: str, env_file: Path) -> bool:
             fg="yellow",
             err=True,
         )
-    else:
-        _keep_private(env_file)
-        click.echo(f"Saved {name} to {env_file}")
+        return True
+    click.echo(f"Saved {name} to {env_file}")
     return True
 
 
-def _keep_private(env_file: Path) -> None:
-    """Make a `.env` that now holds a key readable by its owner only.
+def _key_prompt(name: str, endpoints: list[str]) -> str:
+    if not endpoints:
+        return f"{name} isn't set. Paste it to save it to .env (Enter to skip)"
+    hosts = "that host" if len(endpoints) == 1 else "those hosts"
+    return (
+        f"{name} isn't set. This project sends requests to {', '.join(endpoints)}. "
+        f"Paste it to save it to .env only if you trust {hosts} (Enter to skip)"
+    )
 
-    A new `.env` is already private, but one `crewai create` wrote, or the user
-    made, takes the umask's group and world read bits.
-    """
+
+def _project_endpoints(
+    saved: Mapping[str, str | None], json_crew: Path | None
+) -> list[str]:
+    """Where the project's `.env` and JSON crew send model requests that the
+    machine's own environment does not, each as `host (setting)`."""
+    found = [
+        (value, f"{name} in .env")
+        for name, value in saved.items()
+        if value and _sets_endpoint(name) and value != _MACHINE_ENDPOINTS.get(name)
+    ]
+    if json_crew:
+        found += [
+            (value, f"{key} of {field} in {path.name}")
+            for path, definition in _json_crew_files(json_crew)
+            for field in _JSON_LLM_FIELDS
+            if isinstance(llm := definition.get(field), dict)
+            for key in _JSON_LLM_ENDPOINTS
+            if isinstance(value := llm.get(key), str) and value
+        ]
+    # Escaped: a control character the project put in a setting could move the
+    # cursor and print over the host.
+    return list(
+        dict.fromkeys(
+            f"{_host(value)} ({source})".encode("unicode_escape").decode("ascii")
+            for value, source in found
+        )
+    )
+
+
+def _host(url: str) -> str:
     try:
-        if env_file.stat().st_mode & 0o077:
-            env_file.chmod(0o600)
+        # urlsplit reads no host from `host:port` or `host/path`.
+        host = urlsplit(url if "//" in url else f"//{url}").hostname
+    except ValueError:  # an unclosed `[`, as of an IPv6 address
+        host = None
+    return host or url
+
+
+def _keep_private(env_file: Path) -> bool:
+    """Make the `.env` a key is about to be written to readable by its owner
+    only, and say whether it is.
+
+    One that `crewai create` wrote, or the user made, takes the umask's group
+    and world read bits, and python-dotenv keeps a file's mode when it rewrites
+    it. One it creates is private already: it moves its own temporary file there.
+    """
+    if not env_file.exists() or not env_file.stat().st_mode & 0o077:
+        return True
+    try:
+        env_file.chmod(0o600)
     except OSError:
-        # The key is saved and the run has it; a mode we cannot change, as on
-        # some network or Windows file systems, is not worth stopping for.
-        return
+        return False
+    return True
 
 
 def _can_prompt() -> bool:
@@ -205,14 +295,7 @@ def _env_file(project_dir: Path) -> Path:
 
 
 def _json_crew_models(crew_file: Path, saved: Mapping[str, str | None]) -> list[str]:
-    crew = _load_jsonc(crew_file)
-    listed = crew.get("agents")
-    names = [*(listed if isinstance(listed, list) else []), crew.get("manager_agent")]
-    agents = [
-        _load_jsonc(path)
-        for name in names
-        if isinstance(name, str) and (path := _agent_file(crew_file.parent, name))
-    ]
+    crew, *agents = [definition for _, definition in _json_crew_files(crew_file)]
     models = [
         value
         for definition in (crew, *agents)
@@ -223,6 +306,21 @@ def _json_crew_models(crew_file: Path, saved: Mapping[str, str | None]) -> list[
     if any(agent and agent.get("llm") is None for agent in agents):
         models.append(_configured_model(saved) or DEFAULT_LLM_MODEL)
     return models
+
+
+def _json_crew_files(crew_file: Path) -> list[tuple[Path, dict[str, object]]]:
+    """The JSON crew's file, then each agent file it names, with what they hold."""
+    crew = _load_jsonc(crew_file)
+    listed = crew.get("agents")
+    names = [*(listed if isinstance(listed, list) else []), crew.get("manager_agent")]
+    return [
+        (crew_file, crew),
+        *(
+            (path, _load_jsonc(path))
+            for name in names
+            if isinstance(name, str) and (path := _agent_file(crew_file.parent, name))
+        ),
+    ]
 
 
 def _agent_file(crew_dir: Path, name: str) -> Path | None:
