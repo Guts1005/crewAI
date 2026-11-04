@@ -764,10 +764,16 @@ _NAMED_ERROR_PACKAGES = frozenset(
 
 def _carried_error(error: BaseException) -> BaseException | None:
     """The error ERROR was raised for, when ERROR only carries one: SystemExit,
-    the JSON crew loader's JSONProjectError, or a pydantic ValidationError a
-    validator's own error raised."""
+    the JSON crew loader's JSONProjectError, an ImportError raised from
+    another error, or a pydantic ValidationError a validator's own error
+    raised."""
     if isinstance(error, SystemExit):
         return error.__cause__ or error.__context__
+    # crewAI raises any failure to build a native provider's model, a bad
+    # setting or a blank key, as an ImportError from it (crewai/llm.py). A
+    # provider SDK that is not installed is raised `from None`: it stays one.
+    if isinstance(error, ImportError):
+        return error.__cause__
     # An error's class is defined in a module already loaded, so look these up
     # there: counting a stop must never import crewAI (slow, and it loads a
     # `.env`), nor need pydantic installed.
@@ -822,10 +828,11 @@ def record_run_stopped(
 
     The reason is a word from a closed list. A `load_failed` stop also carries
     the class of ERROR, the error the project failed to load with, as
-    `error_class`: the class behind a SystemExit, a JSONProjectError or a
-    pydantic ValidationError, by name when Python, crewAI or a library crewAI
-    loads projects with defines it, else `other`. Never the error's message,
-    which can carry a path, a project name or the project's own code.
+    `error_class`: the class behind a SystemExit, a JSONProjectError, an
+    ImportError or a pydantic ValidationError, by name when Python, crewAI or
+    a library crewAI loads projects with defines it, else `other`. Never the
+    error's message, which can carry a path, a project name or the project's
+    own code.
     """
     attributes = None
     if reason == "load_failed" and error is not None:

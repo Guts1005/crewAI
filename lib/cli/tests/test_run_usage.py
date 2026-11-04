@@ -629,12 +629,23 @@ def json_decode_error() -> Exception:
             ),
             "JSONDecodeError",
         ),
+        (
+            lambda: json_project_error(raised_from(ImportError(SECRET), None)),
+            "ImportError",
+        ),
+        (
+            lambda: json_project_error(
+                raised_from(ImportError(SECRET), validation_error(None))
+            ),
+            "ValidationError",
+        ),
         (a_library_error, "ConnectError"),
         (a_yaml_error, "YAMLError"),
         (projects_own_error, "other"),
         (lambda: projects_own_error("crewai_acme.errors"), "other"),
         (lambda: raised_from(SystemExit(1), projects_own_error()), "other"),
         (lambda: json_project_error(projects_own_error()), "other"),
+        (lambda: raised_from(ImportError(SECRET), projects_own_error()), "other"),
     ],
     ids=[
         "module_not_found",
@@ -646,12 +657,15 @@ def json_decode_error() -> Exception:
         "validation_error_from_a_validator",
         "validation_error_of_a_missing_field",
         "each_wrapper_in_turn",
+        "an_import_error_raised_from_none_behind_json_project_error",
+        "an_import_error_raised_from_another_behind_json_project_error",
         "a_library_error",
         "a_yaml_error",
         "a_projects_own_error",
         "a_package_named_like_crewai",
         "a_projects_own_error_behind_system_exit",
         "a_projects_own_error_behind_json_project_error",
+        "a_projects_own_error_behind_an_import_error",
     ],
 )
 def test_a_load_failed_stop_names_the_error_behind_it_and_nothing_of_the_project(
@@ -702,29 +716,36 @@ def test_counting_the_class_imports_neither_crewai_nor_pydantic(
     assert error_classes == ["ModuleNotFoundError"]
 
 
-def test_a_json_crew_whose_provider_sdk_is_not_installed_counts_the_import_error(
-    project, usage, error_classes, monkeypatch
+@pytest.mark.parametrize(
+    ("llm", "openai_api_key", "error_class"),
+    [
+        ({"model": "openai/gpt-4o-mini", "temperature": "hot"}, "sk-test", "ValidationError"),
+        ("openai/gpt-4o-mini", "", "OpenAIError"),
+        ("anthropic/claude-sonnet-4-5", "sk-test", "ImportError"),
+    ],
+    ids=["a_setting_its_model_rejects", "a_blank_key", "a_provider_sdk_not_installed"],
+)
+def test_a_json_crew_whose_model_cannot_be_built_counts_why(
+    project, usage, error_classes, monkeypatch, llm, openai_api_key, error_class
 ) -> None:
-    """crewAI raises ImportError for a model whose provider SDK is missing, and
-    the JSON loader wraps it in a JSONProjectError naming the agent's file."""
-    from crewai.project import crew_loader
+    """crewAI raises any failure to build a model as an ImportError, which the
+    JSON loader wraps in a JSONProjectError naming the agent's file: the class
+    counted is the one behind both, and a missing SDK's ImportError has none."""
     from crewai.project.json_loader import JSONProjectError
 
-    def load_crew(_path: Path) -> None:
-        missing = ImportError(
-            'Anthropic native provider not available, to install: uv add "crewai[anthropic]"'
-        )
-        raise JSONProjectError(
-            f"{SECRET}/agents/researcher.jsonc: failed to load agent: {missing}"
-        ) from missing
-
-    monkeypatch.setattr(crew_loader, "load_crew", load_crew)
+    crew_path = buildable_json_crew(project, llm)
+    monkeypatch.setenv("OPENAI_API_KEY", openai_api_key)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    monkeypatch.delitem(
+        sys.modules, "crewai.llms.providers.anthropic.completion", raising=False
+    )
 
     with pytest.raises(JSONProjectError, match="failed to load agent"):
-        run_crew_module._load_json_crew(project / "crew.jsonc")
+        run_crew_module._load_json_crew(crew_path)
 
     assert usage == [stopped("load_failed")]
-    assert error_classes == ["ImportError"]
+    assert error_classes == [error_class]
 
 
 @pytest.mark.parametrize(
@@ -1168,22 +1189,29 @@ def test_quitting_at_the_key_prompt_counts_where_the_run_stopped(
 PROMPT = "{} isn't set. Paste it to save it to .env (Enter to skip)"
 
 
-def keyless_json_crew(folder: Path, monkeypatch: pytest.MonkeyPatch, llm: str) -> None:
-    """A JSON crew crewAI builds for real, with no key set for LLM's provider."""
-    # crewAI loads a `.env` when it is first imported: import it before the keys go.
+def buildable_json_crew(folder: Path, llm: str | dict[str, str]) -> Path:
+    """A JSON crew crewAI builds for real, its one agent on LLM."""
+    # crewAI loads a `.env` when it is first imported: import it before a test
+    # sets the keys.
     import crewai.project.crew_loader  # noqa: F401
 
     write(folder / "pyproject.toml", JSON_CREW_PYPROJECT)
     write(
+        folder / "agents" / "researcher.jsonc",
+        json.dumps(
+            {"role": "Researcher", "goal": "Research", "backstory": "Curious", "llm": llm}
+        ),
+    )
+    return write(
         folder / "crew.jsonc",
         '{"name": "Demo", "agents": ["researcher"], "memory": false, "tasks": '
         '[{"description": "Say hi", "expected_output": "hi", "agent": "researcher"}]}',
     )
-    write(
-        folder / "agents" / "researcher.jsonc",
-        '{"role": "Researcher", "goal": "Research", "backstory": "Curious", '
-        f'"llm": "{llm}"}}',
-    )
+
+
+def keyless_json_crew(folder: Path, monkeypatch: pytest.MonkeyPatch, llm: str) -> None:
+    """A JSON crew crewAI builds for real, with no key set for LLM's provider."""
+    buildable_json_crew(folder, llm)
     without_api_keys(monkeypatch, "OPENAI_API_KEY", "DEEPSEEK_API_KEY")
 
 
